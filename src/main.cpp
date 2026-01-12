@@ -101,7 +101,9 @@ constexpr dawn::mmio_handler_t clint_handler{
     ._start  = clint_mmio_start,
     ._stop   = clint_mmio_stop,
     ._load64 = [](uint64_t addr) -> uint64_t {
-      if (addr == clint_mmio_start + 0x4000) {  // mtimercmp
+      if (addr == clint_mmio_start) {  // msip
+        return (machine->read_csr(dawn::MIP) >> 3) & 1;
+      } else if (addr == clint_mmio_start + 0x4000) {  // mtimercmp
         return timercmp;
       } else if (addr == clint_mmio_start + 0xbff8) {  // mtimer
         return timer;
@@ -110,8 +112,18 @@ constexpr dawn::mmio_handler_t clint_handler{
     },
     ._store64 =
         [](uint64_t addr, uint64_t value) {
-          if (addr == clint_mmio_start + 0x4000) {  // mtimercmp
+          if (addr == clint_mmio_start) {  // msip
+            if (value & 1)
+              machine->_csr[dawn::MIP] |= (1ull << 3);
+            else
+              machine->_csr[dawn::MIP] &= ~(1ull << 3);
+          } else if (addr == clint_mmio_start + 0x4000) {  // mtimercmp
             timercmp = value;
+            if (timer >= timercmp) {
+              machine->_csr[dawn::MIP] |= (1ull << 7);
+            } else {
+              machine->_csr[dawn::MIP] &= ~(1ull << 7);
+            }
           } else if (addr == clint_mmio_start + 0xbff8) {  // mtimer
             timer = value;
             // TODO: remove this
@@ -435,14 +447,12 @@ int main(int argc, char **argv) {
   // run more than 10 instructions at a time
   boot_time = get_time_now_us();
   while (1) {
-    if (!machine->_wfi) machine->step(10);
+    machine->step(10);
     timer = get_time_now_us() - boot_time;
-    if (timercmp) {
-      if (timer > timercmp) {
-        machine->_wfi = false;
-        machine->handle_trap(dawn::exception_code_t::e_machine_timer_interrupt,
-                             0);
-      }
+    if (timer > timercmp) {
+      machine->_csr[dawn::MIP] |= (1ull << 7);  // set mtip
+    } else {
+      machine->_csr[dawn::MIP] &= ~(1ull << 7);  // set mtip
     }
   }
 
