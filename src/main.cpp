@@ -122,6 +122,15 @@ constexpr uint64_t offset             = 0;
 constexpr uint64_t timebase_frequency = 1000000;
 constexpr uint64_t ram_size           = 128 * 1024 * 1024;
 
+// framebuffer is not implemented as a mmio
+// can be converted to be an mmio later if required
+constexpr uint64_t framebuffer_mmio_start = 0x07000000;
+constexpr uint64_t width                  = 600;
+constexpr uint64_t height                 = 400;
+constexpr uint64_t stride                 = width * 4;
+constexpr uint64_t framebuffer_mmio_stop =
+    framebuffer_mmio_start + (width * height * 4);
+
 void setup_fdt_root_properties(void *fdt) {
   if (fdt_setprop_string(fdt, 0, "compatible", "riscv-minimal-nommu"))
     throw std::runtime_error("failed to set compatible property");
@@ -256,32 +265,27 @@ int add_fdt_clint_node(void *fdt, int soc, uint32_t intc_phandle) {
   return clint;
 }
 
-// TODO: add framebuffer
-// int add_fdt_framebuffer_node(void *fdt, int soc) {
-//   std::string fb_node_name =
-//       "framebuffer@" + std::to_string(constants::framebuffer::start_address);
-//   int      fb_node  = fdt_add_subnode(fdt, soc, fb_node_name.c_str());
-//   uint64_t fb_reg[] = {cpu_to_fdt64(constants::framebuffer::start_address),
-//                        cpu_to_fdt64(constants::framebuffer::reg_size)};
-//   if (fdt_setprop_string(fdt, fb_node, "compatible",
-//                          constants::device_tree::fb_compatible))
-//     throw std::runtime_error("failed to set framebuffer compatible
-//     property");
-//   if (fdt_setprop(fdt, fb_node, "reg", fb_reg, sizeof(fb_reg)))
-//     throw std::runtime_error("failed to set framebuffer reg property");
-//   if (fdt_setprop_cell(fdt, fb_node, "width", constants::framebuffer::width))
-//     throw std::runtime_error("failed to set framebuffer width property");
-//   if (fdt_setprop_cell(fdt, fb_node, "height",
-//   constants::framebuffer::height))
-//     throw std::runtime_error("failed to set framebuffer height property");
-//   if (fdt_setprop_cell(fdt, fb_node, "stride",
-//   constants::framebuffer::stride))
-//     throw std::runtime_error("failed to set framebuffer stride property");
-//   if (fdt_setprop_string(fdt, fb_node, "format",
-//                          constants::framebuffer::format))
-//     throw std::runtime_error("failed to set framebuffer format property");
-//   return fb_node;
-// }
+int add_fdt_framebuffer_node(void *fdt, int soc) {
+  std::string fb_node_name =
+      "framebuffer@" + std::to_string(framebuffer_mmio_start);
+  int      fb_node  = fdt_add_subnode(fdt, soc, fb_node_name.c_str());
+  uint64_t fb_reg[] = {
+      cpu_to_fdt64(framebuffer_mmio_start),
+      cpu_to_fdt64(framebuffer_mmio_stop - framebuffer_mmio_start)};
+  if (fdt_setprop_string(fdt, fb_node, "compatible", "simple-framebuffer"))
+    throw std::runtime_error("failed to set framebuffer compatible property");
+  if (fdt_setprop(fdt, fb_node, "reg", fb_reg, sizeof(fb_reg)))
+    throw std::runtime_error("failed to set framebuffer reg property");
+  if (fdt_setprop_cell(fdt, fb_node, "width", width))
+    throw std::runtime_error("failed to set framebuffer width property");
+  if (fdt_setprop_cell(fdt, fb_node, "height", height))
+    throw std::runtime_error("failed to set framebuffer height property");
+  if (fdt_setprop_cell(fdt, fb_node, "stride", stride))
+    throw std::runtime_error("failed to set framebuffer stride property");
+  if (fdt_setprop_string(fdt, fb_node, "format", "a8r8g8b8"))
+    throw std::runtime_error("failed to set framebuffer format property");
+  return fb_node;
+}
 
 std::vector<uint8_t> generate_dtb() {
   std::vector<uint8_t> blob(64 * 1024);
@@ -292,15 +296,15 @@ std::vector<uint8_t> generate_dtb() {
 
   setup_fdt_root_properties(fdt);
 
-  int chosen = add_fdt_chosen_node(fdt);
-  int memory = add_fdt_memory_node(fdt, ram_size);
-  int cpus   = add_fdt_cpus_node(fdt);
-  int cpu0   = add_fdt_cpu_node(fdt, cpus);
-  int intc   = add_fdt_interrupt_controller(fdt, cpu0);
-  int soc    = add_fdt_soc_node(fdt);
-  int uart   = add_fdt_uart_node(fdt, soc);
-  int clint  = add_fdt_clint_node(fdt, soc, intc);
-  // int fb_node = add_fdt_framebuffer_node(fdt, soc);
+  int chosen  = add_fdt_chosen_node(fdt);
+  int memory  = add_fdt_memory_node(fdt, ram_size);
+  int cpus    = add_fdt_cpus_node(fdt);
+  int cpu0    = add_fdt_cpu_node(fdt, cpus);
+  int intc    = add_fdt_interrupt_controller(fdt, cpu0);
+  int soc     = add_fdt_soc_node(fdt);
+  int uart    = add_fdt_uart_node(fdt, soc);
+  int clint   = add_fdt_clint_node(fdt, soc, intc);
+  int fb_node = add_fdt_framebuffer_node(fdt, soc);
 
   return blob;
 }
@@ -308,7 +312,8 @@ std::vector<uint8_t> generate_dtb() {
 int main(int argc, char **argv) {
   if (argc != 2) throw std::runtime_error("[dem] [Image]");
 
-  dawn::machine_t machine{ram_size, offset, {uart_handler, clint_handler}};
+  static dawn::machine_t machine{
+      ram_size, offset, {uart_handler, clint_handler}};
 
   auto kernel = read_file(argv[1]);
   std::cout << "kernel size: " << kernel.size() << '\n';
@@ -331,6 +336,18 @@ int main(int argc, char **argv) {
     tcgetattr(0, &term);
     term.c_lflag |= ICANON | ECHO;
     tcsetattr(0, TCSANOW, &term);
+
+    [](const std::string &filename, const uint8_t *data, int width,
+       int height) {
+      std::ofstream file(filename, std::ios::binary);
+      if (!file.is_open()) {
+        throw std::runtime_error("Failed to create PPM file: " + filename);
+      }
+      file << "P6\n" << width << " " << height << "\n255\n";
+      for (int i = 0; i < width * height; i++) {
+        file.write(reinterpret_cast<const char *>(&data[i * 4]), 3);
+      }
+    }("test.ppm", machine.at(framebuffer_mmio_start), width, height);
   });
 
   signal(SIGINT, [](int sig) { exit(0); });
