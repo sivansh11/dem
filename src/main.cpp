@@ -18,7 +18,12 @@ using namespace std::string_literals;  // for ""s suffix
 #include <libfdt.h>
 #include <libfdt_env.h>
 
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+
 #include "dawn/dawn.hpp"
+
+static dawn::machine_t *machine;
 
 std::string to_hex_string(uint64_t val) { return std::format("{:#x}", val); }
 
@@ -130,6 +135,84 @@ constexpr uint64_t height                 = 400;
 constexpr uint64_t stride                 = width * 4;
 constexpr uint64_t framebuffer_mmio_stop =
     framebuffer_mmio_start + (width * height * 4);
+
+static bool should_close = false;
+void        x11_framebuffer_thread() {
+  Display *display = XOpenDisplay(nullptr);
+  if (!display) {
+    throw std::runtime_error("Failed to open X11 display");
+  }
+
+  int    screen = DefaultScreen(display);
+  Window root   = RootWindow(display, screen);
+
+  XVisualInfo vinfo;
+  if (!XMatchVisualInfo(display, screen, 24, TrueColor, &vinfo)) {
+    throw std::runtime_error("Failed to find 24-bit visual");
+  }
+
+  XSetWindowAttributes attr;
+  attr.colormap = XCreateColormap(display, root, vinfo.visual, AllocNone);
+  attr.border_pixel     = 0;
+  attr.background_pixel = 0;
+  attr.event_mask       = StructureNotifyMask;
+
+  Window window = XCreateWindow(
+      display, root, 0, 0, width, height, 0, vinfo.depth, InputOutput,
+      vinfo.visual, CWColormap | CWBorderPixel | CWBackPixel | CWEventMask,
+      &attr);
+
+  XMapWindow(display, window);
+  XStoreName(display, window, "DEM");
+
+  GC gc = DefaultGC(display, screen);
+
+  std::vector<uint8_t> image_buffer(width * height * 4);
+  XImage *image = XCreateImage(display, vinfo.visual, vinfo.depth, ZPixmap, 0,
+                                      reinterpret_cast<char *>(image_buffer.data()),
+                                      width, height, 32, width * 4);
+  if (!image) {
+    throw std::runtime_error("Failed to create XImage");
+  }
+
+  XFlush(display);
+  XSync(display, False);
+
+  std::cout << "X11 window created: " << width << "x" << height
+            << ", depth: " << vinfo.depth << ", stride: " << stride
+            << std::endl;
+
+  const uint64_t frame_duration_us = 33333;
+  uint64_t       last_frame_us     = get_time_now_us();
+
+  while (!should_close) {
+    uint64_t now_us = get_time_now_us();
+    if (now_us - last_frame_us >= frame_duration_us) {
+      const uint8_t *fb_data = machine->at(framebuffer_mmio_start);
+      for (int i = 0; i < width * height; i++) {
+        uint32_t pixel = *reinterpret_cast<const uint32_t *>(fb_data + i * 4);
+        // Convert a8r8g8b8 to x8r8g8b8 (ignore alpha)
+        uint8_t  b      = (pixel >> 0) & 0xFF;
+        uint8_t  g      = (pixel >> 8) & 0xFF;
+        uint8_t  r      = (pixel >> 16) & 0xFF;
+        uint8_t  a      = (pixel >> 24) & 0xFF;
+        uint32_t xpixel = (a << 24) | (r << 16) | (g << 8) | b;
+        *reinterpret_cast<uint32_t *>(image_buffer.data() + i * 4) = xpixel;
+      }
+
+      int result =
+          XPutImage(display, window, gc, image, 0, 0, 0, 0, width, height);
+
+      XFlush(display);
+      last_frame_us = now_us;
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(1000));
+  }
+
+  XDestroyImage(image);
+  XDestroyWindow(display, window);
+  XCloseDisplay(display);
+}
 
 void setup_fdt_root_properties(void *fdt) {
   if (fdt_setprop_string(fdt, 0, "compatible", "riscv-minimal-nommu"))
@@ -312,23 +395,23 @@ std::vector<uint8_t> generate_dtb() {
 int main(int argc, char **argv) {
   if (argc != 2) throw std::runtime_error("[dem] [Image]");
 
-  static dawn::machine_t machine{
-      ram_size, offset, {uart_handler, clint_handler}};
+  machine =
+      new dawn::machine_t(ram_size, offset, {uart_handler, clint_handler});
 
   auto kernel = read_file(argv[1]);
   std::cout << "kernel size: " << kernel.size() << '\n';
   std::cout << "kernel loaded at: " << offset << '\n';
-  machine.memcpy_host_to_guest(offset, kernel.data(), kernel.size());
-  machine._pc = offset;
+  machine->memcpy_host_to_guest(offset, kernel.data(), kernel.size());
+  machine->_pc = offset;
 
   auto     dtb      = generate_dtb();
   uint64_t dtb_addr = kernel.size() + offset;
   dtb_addr += dtb_addr % 8;
   std::cout << "dtb size: " << dtb.size() << '\n';
-  machine.memcpy_host_to_guest(dtb_addr, dtb.data(), dtb.size());
+  machine->memcpy_host_to_guest(dtb_addr, dtb.data(), dtb.size());
   std::cout << "dtb loaded at: " << std::hex << dtb_addr << '\n';
-  machine._reg[10] = 0;
-  machine._reg[11] = dtb_addr;
+  machine->_reg[10] = 0;
+  machine->_reg[11] = dtb_addr;
 
   // setup terminal for uart
   std::atexit([]() {
@@ -336,18 +419,7 @@ int main(int argc, char **argv) {
     tcgetattr(0, &term);
     term.c_lflag |= ICANON | ECHO;
     tcsetattr(0, TCSANOW, &term);
-
-    [](const std::string &filename, const uint8_t *data, int width,
-       int height) {
-      std::ofstream file(filename, std::ios::binary);
-      if (!file.is_open()) {
-        throw std::runtime_error("Failed to create PPM file: " + filename);
-      }
-      file << "P6\n" << width << " " << height << "\n255\n";
-      for (int i = 0; i < width * height; i++) {
-        file.write(reinterpret_cast<const char *>(&data[i * 4]), 3);
-      }
-    }("test.ppm", machine.at(framebuffer_mmio_start), width, height);
+    should_close = true;
   });
 
   signal(SIGINT, [](int sig) { exit(0); });
@@ -357,17 +429,19 @@ int main(int argc, char **argv) {
   term.c_lflag &= ~(ICANON | ECHO);
   tcsetattr(0, TCSANOW, &term);
 
+  std::thread framebuffer_thread{x11_framebuffer_thread};
+
   // TODO: more efficient main loop
   // run more than 10 instructions at a time
   boot_time = get_time_now_us();
   while (1) {
-    if (!machine._wfi) machine.step(10);
+    if (!machine->_wfi) machine->step(10);
     timer = get_time_now_us() - boot_time;
     if (timercmp) {
       if (timer > timercmp) {
-        machine._wfi = false;
-        machine.handle_trap(dawn::exception_code_t::e_machine_timer_interrupt,
-                            0);
+        machine->_wfi = false;
+        machine->handle_trap(dawn::exception_code_t::e_machine_timer_interrupt,
+                             0);
       }
     }
   }
