@@ -443,16 +443,43 @@ int main(int argc, char **argv) {
 
   std::thread framebuffer_thread{x11_framebuffer_thread};
 
-  // TODO: more efficient main loop
-  // run more than 10 instructions at a time
-  boot_time = get_time_now_us();
+  boot_time                   = get_time_now_us();
+  uint64_t total_instructions = 0;
+  uint64_t ips                = 1;
   while (1) {
-    machine->step(10);
-    timer = get_time_now_us() - boot_time;
-    if (timer > timercmp) {
-      machine->_csr[dawn::MIP] |= (1ull << 7);  // set mtip
-    } else {
-      machine->_csr[dawn::MIP] &= ~(1ull << 7);  // set mtip
+    uint64_t instructions_in_loop = 0;
+    uint64_t loop_start           = get_time_now_us();
+    while (instructions_in_loop < 1000) {
+      uint64_t num_instructions = 10;
+      if (timercmp && timercmp > timer) {
+        uint64_t time_left = timercmp - timer;
+        num_instructions   = (time_left * ips) / 1;
+        num_instructions   = std::max(num_instructions, (uint64_t)1);
+        num_instructions   = std::min(num_instructions, (uint64_t)100000);
+      }
+      if (!machine->_wfi) {
+        machine->step(num_instructions);
+        instructions_in_loop += num_instructions;
+        total_instructions += num_instructions;
+      } else {
+        // need to run step 0 since pending interrupts are handled in step
+        machine->step(0);
+        if (timercmp && timercmp > timer) {
+          uint64_t time_left = timercmp - timer;
+          std::this_thread::sleep_for(std::chrono::microseconds(time_left));
+        }
+      }
+      timer = get_time_now_us() - boot_time;
+      if (timercmp && timer > timercmp) {
+        machine->_csr[dawn::MIP] |= (1ull << 7);  // set mtip
+      } else {
+        machine->_csr[dawn::MIP] &= ~(1ull << 7);  // set mtip
+      }
+    }
+
+    uint64_t elapsed = get_time_now_us() - loop_start;
+    if (elapsed > 0 && instructions_in_loop > 0) {
+      ips = (ips * 8 + (instructions_in_loop / elapsed) * 2) / 10;
     }
   }
 
