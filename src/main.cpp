@@ -155,8 +155,8 @@ constexpr dawn::mmio_handler_t framebuffer_handler{
 const std::string bootargs =
     "earlycon=uart8250,mmio," + to_hex_string(uart_mmio_start) + "," +
     std::to_string(timebase_frequency) + " console=ttyS0";
-constexpr uint64_t offset   = 0;
-constexpr uint64_t ram_size = 128 * 1024 * 1024;
+constexpr uint64_t offset   = 0x80000000;
+constexpr uint64_t ram_size = 1024 * 1024 * 1024;
 
 static bool should_close = false;
 void        x11_framebuffer_thread() {
