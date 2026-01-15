@@ -131,6 +131,26 @@ constexpr dawn::mmio_handler_t clint_handler{
           }
         }};
 
+constexpr uint64_t framebuffer_mmio_start = 0x50000000;
+constexpr uint64_t width                  = 600;
+constexpr uint64_t height                 = 400;
+constexpr uint64_t stride                 = width * 4;
+constexpr uint64_t framebuffer_mmio_stop =
+    framebuffer_mmio_start + (width * height * 4);
+uint8_t                        framebuffer[width * height * 4];
+constexpr dawn::mmio_handler_t framebuffer_handler{
+    ._start  = framebuffer_mmio_start,
+    ._stop   = framebuffer_mmio_stop,
+    ._load64 = [](uint64_t addr) -> uint64_t {
+      uint64_t offset = addr - framebuffer_mmio_start;
+      return *reinterpret_cast<uint64_t *>(&framebuffer[offset]);
+    },
+    ._store64 =
+        [](uint64_t addr, uint64_t value) {
+          uint64_t offset = addr - framebuffer_mmio_start;
+          *reinterpret_cast<uint64_t *>(&framebuffer[offset]) = value;
+        }};
+
 // TODO: dont hardcode 0x10000000,1000000, use uart_mmio_start and
 // timebase_frequency
 const char *bootargs =
@@ -138,15 +158,6 @@ const char *bootargs =
 constexpr uint64_t offset             = 0;
 constexpr uint64_t timebase_frequency = 1000000;
 constexpr uint64_t ram_size           = 128 * 1024 * 1024;
-
-// framebuffer is not implemented as a mmio
-// can be converted to be an mmio later if required
-constexpr uint64_t framebuffer_mmio_start = 0x07000000;
-constexpr uint64_t width                  = 600;
-constexpr uint64_t height                 = 400;
-constexpr uint64_t stride                 = width * 4;
-constexpr uint64_t framebuffer_mmio_stop =
-    framebuffer_mmio_start + (width * height * 4);
 
 static bool should_close = false;
 void        x11_framebuffer_thread() {
@@ -200,7 +211,7 @@ void        x11_framebuffer_thread() {
   while (!should_close) {
     uint64_t now_us = get_time_now_us();
     if (now_us - last_frame_us >= frame_duration_us) {
-      const uint8_t *fb_data = machine->at(framebuffer_mmio_start);
+      const uint8_t *fb_data = framebuffer;
       for (int i = 0; i < width * height; i++) {
         uint32_t pixel = *reinterpret_cast<const uint32_t *>(fb_data + i * 4);
         // Convert a8r8g8b8 to x8r8g8b8 (ignore alpha)
@@ -407,8 +418,8 @@ std::vector<uint8_t> generate_dtb() {
 int main(int argc, char **argv) {
   if (argc != 2) throw std::runtime_error("[dem] [Image]");
 
-  machine =
-      new dawn::machine_t(ram_size, offset, {uart_handler, clint_handler});
+  machine = new dawn::machine_t(
+      ram_size, offset, {framebuffer_handler, uart_handler, clint_handler});
 
   auto kernel = read_file(argv[1]);
   std::cout << "kernel size: " << kernel.size() << '\n';
