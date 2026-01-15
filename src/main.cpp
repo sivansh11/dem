@@ -71,8 +71,9 @@ int read_kbbyte() {
     return -1;
 }
 
-constexpr uint64_t             uart_mmio_start = 0x10000000;
-constexpr uint64_t             uart_mmio_stop  = 0x10000100;
+constexpr uint64_t             uart_mmio_start    = 0x10000000;
+constexpr uint64_t             uart_mmio_stop     = 0x10000100;
+constexpr uint64_t             timebase_frequency = 1000000;
 constexpr dawn::mmio_handler_t uart_handler{
     ._start  = uart_mmio_start,
     ._stop   = uart_mmio_stop,
@@ -151,13 +152,11 @@ constexpr dawn::mmio_handler_t framebuffer_handler{
           *reinterpret_cast<uint64_t *>(&framebuffer[offset]) = value;
         }};
 
-// TODO: dont hardcode 0x10000000,1000000, use uart_mmio_start and
-// timebase_frequency
-const char *bootargs =
-    "earlycon=uart8250,mmio,0x10000000,1000000 console=tty1 console=ttyS0";
-constexpr uint64_t offset             = 0;
-constexpr uint64_t timebase_frequency = 1000000;
-constexpr uint64_t ram_size           = 128 * 1024 * 1024;
+const std::string bootargs =
+    "earlycon=uart8250,mmio," + to_hex_string(uart_mmio_start) + "," +
+    std::to_string(timebase_frequency) + " console=ttyS0";
+constexpr uint64_t offset   = 0;
+constexpr uint64_t ram_size = 128 * 1024 * 1024;
 
 static bool should_close = false;
 void        x11_framebuffer_thread() {
@@ -252,7 +251,7 @@ int add_fdt_chosen_node(void *fdt) {
   int chosen = fdt_add_subnode(fdt, 0, "chosen");
   if (chosen < 0) throw std::runtime_error("failed to add chosen subnode");
 
-  if (fdt_setprop_string(fdt, chosen, "bootargs", bootargs))
+  if (fdt_setprop_string(fdt, chosen, "bootargs", bootargs.c_str()))
     throw std::runtime_error("failed to set bootargs property");
   return chosen;
 }
