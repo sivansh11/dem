@@ -338,8 +338,7 @@ int add_fdt_uart_node(void *fdt, int soc) {
   if (uart < 0) throw std::runtime_error("failed to add uart subnode");
   uint64_t uart_reg[] = {cpu_to_fdt64(uart_mmio_start),
                          cpu_to_fdt64(uart_mmio_stop - uart_mmio_start)};
-  // TODO: 0x1000000 should be configurable ?
-  if (fdt_setprop_cell(fdt, uart, "clock-frequency", 0x1000000))
+  if (fdt_setprop_cell(fdt, uart, "clock-frequency", timebase_frequency))
     throw std::runtime_error("failed to set uart clock-frequency property");
   if (fdt_setprop(fdt, uart, "reg", uart_reg, sizeof(uart_reg)))
     throw std::runtime_error("failed to set uart reg property");
