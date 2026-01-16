@@ -538,6 +538,8 @@ int main(int argc, char **argv) {
   machine->_reg[10] = 0;
   machine->_reg[11] = dtb_addr;
 
+  std::cout << "bootargs: " << bootargs << '\n';
+
   // setup terminal for uart
   std::atexit([]() {
     struct termios term;
