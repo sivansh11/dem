@@ -512,6 +512,7 @@ std::vector<uint8_t> generate_dtb() {
   int clint   = add_fdt_clint_node(fdt, soc, intc);
   int fb_node = add_fdt_framebuffer_node(fdt, soc);
 
+  blob.resize(fdt_totalsize(fdt));
   return blob;
 }
 
