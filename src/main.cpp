@@ -516,27 +516,54 @@ std::vector<uint8_t> generate_dtb() {
   return blob;
 }
 
+void patch_dtb(std::vector<uint8_t> &blob, uint64_t initrd_addr,
+               uint64_t initrd_size) {
+  void *fdt    = blob.data();
+  int   chosen = fdt_path_offset(fdt, "/chosen");
+  if (chosen < 0) throw std::runtime_error("failed to get chosen subnode");
+  if (fdt_setprop_cell(fdt, chosen, "linux,initrd-start", initrd_addr))
+    throw std::runtime_error("failed to set linux,initrd-start property");
+  if (fdt_setprop_cell(fdt, chosen, "linux,initrd-end",
+                       initrd_addr + initrd_size))
+    throw std::runtime_error("failed to set linux,initrd-end property");
+}
+
 int main(int argc, char **argv) {
-  if (argc != 2) throw std::runtime_error("[dem] [Image]");
+  if (argc != 3) throw std::runtime_error("[dem] [Image] [initrd]");
 
   machine = new dawn::machine_t(
       ram_size, offset,
       {framebuffer_handler, uart_handler, clint_handler, plic_handler});
 
+  // read kernel
   auto kernel = read_file(argv[1]);
+
+  // read initrd
+  auto initrd = read_file(argv[2]);
+
+  // generate dtb
+  auto dtb = generate_dtb();
+
   std::cout << "kernel size: " << kernel.size() << '\n';
   std::cout << "kernel loaded at: " << offset << '\n';
   machine->memcpy_host_to_guest(offset, kernel.data(), kernel.size());
   machine->_pc = offset;
 
-  auto     dtb      = generate_dtb();
   uint64_t dtb_addr = kernel.size() + offset;
   dtb_addr += dtb_addr % 8;
+  uint64_t initrd_addr = dtb_addr + dtb.size();
+  initrd_addr += initrd_addr % 8;
+  patch_dtb(dtb, initrd_addr, initrd.size());
+
   std::cout << "dtb size: " << dtb.size() << '\n';
   machine->memcpy_host_to_guest(dtb_addr, dtb.data(), dtb.size());
   std::cout << "dtb loaded at: " << std::hex << dtb_addr << '\n';
   machine->_reg[10] = 0;
   machine->_reg[11] = dtb_addr;
+
+  std::cout << "initrd size: " << initrd.size() << '\n';
+  std::cout << "initrd loaded at: " << initrd_addr << '\n';
+  machine->memcpy_host_to_guest(initrd_addr, initrd.data(), initrd.size());
 
   std::cout << "bootargs: " << bootargs << '\n';
 
