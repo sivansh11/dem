@@ -342,7 +342,7 @@ int add_fdt_uart_node(void *fdt, int soc) {
     throw std::runtime_error("failed to set uart clock-frequency property");
   if (fdt_setprop(fdt, uart, "reg", uart_reg, sizeof(uart_reg)))
     throw std::runtime_error("failed to set uart reg property");
-  if (fdt_setprop_string(fdt, uart, "compatible", "ns16850"))
+  if (fdt_setprop_string(fdt, uart, "compatible", "ns16550a"))
     throw std::runtime_error("failed to set uart compatible property");
   return uart;
 }
