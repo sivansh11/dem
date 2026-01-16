@@ -1,4 +1,5 @@
 #include <chrono>
+#include <compare>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -70,6 +71,77 @@ int read_kbbyte() {
   else
     return -1;
 }
+
+constexpr uint64_t plic_mmio_start = 0x0c000000;
+constexpr uint64_t plic_mmio_stop  = 0x10000000;
+struct plic_t {
+  uint32_t _priority[1024];  // 1024 priority of each source
+  uint32_t _pending[32];     // 1024 pending bits
+  uint32_t _enable[32];      // 1024 enable bits per context (only 1 context)
+  uint32_t _threshold;       // minimum priority to trigger an interrupt
+};
+static plic_t                  plic{};
+constexpr dawn::mmio_handler_t plic_handler{
+    ._start  = plic_mmio_start,
+    ._stop   = plic_mmio_stop,
+    ._load64 = [](uint64_t addr) -> uint64_t {
+      uint64_t offset = addr - plic_mmio_start;
+      if (offset < 0x1000) {  // priority
+        return plic._priority[offset >> 2];
+      } else if (offset >= 0x1000 && offset < 0x1080) {  // pending
+        return plic._pending[(offset - 0x1000) >> 2];
+      } else if (offset >= 0x2000 && offset < 0x2100) {  // enable
+        return plic._enable[(offset & 0x7f) >> 2];
+      } else if (offset >= 0x200000) {  // threashold & claim/complete
+        uint64_t reg_type = offset & 0xfff;
+        if (reg_type == 0) return plic._threshold;
+        if (reg_type == 4) {  // claim
+          uint32_t best_id      = 0;
+          uint32_t max_priority = plic._threshold;
+          for (uint32_t id = 1; id < 1024; id++) {  // id 0 is reserved/null
+            uint32_t word_idx   = id / 32;
+            uint32_t bit_mask   = 1 << (id % 32);
+            bool     is_pending = (plic._pending[word_idx] & bit_mask) != 0;
+            bool     is_enabled = (plic._enable[word_idx] & bit_mask) != 0;
+            if (is_pending && is_enabled) {
+              uint32_t current_priority = plic._priority[id];
+              if (current_priority > max_priority) {
+                max_priority = current_priority;
+                best_id      = id;
+              }
+            }
+          }
+          if (best_id > 0) {  // clear pending
+            plic._pending[best_id / 32] &= ~(1 << (best_id % 32));
+          }
+          return best_id;
+        }
+      }
+      return 0;
+    },
+    ._store64 =
+        [](uint64_t addr, uint64_t value) {
+          uint64_t offset = addr - plic_mmio_start;
+          uint32_t val32  = static_cast<uint32_t>(value);
+          if (offset < 0x1000) {  // priority
+            uint32_t source = offset >> 2;
+            if (source > 0 && source < 1024) {
+              plic._priority[source] = val32;
+            }
+          } else if (offset >= 0x1000 && offset < 0x1080) {
+            // readonly, ignore writes
+          } else if (offset >= 0x2000 && offset < 0x2100) {
+            uint32_t reg_idx      = (offset & 0x7f) >> 2;
+            plic._enable[reg_idx] = val32;
+          } else if (offset >= 0x200000) {
+            uint32_t reg_type = offset & 0xfff;
+            if (reg_type == 0) {
+              plic._threshold = val32;
+            } else if (reg_type == 4) {
+              // do nothing on complete
+            }
+          }
+        }};
 
 constexpr uint64_t             uart_mmio_start    = 0x10000000;
 constexpr uint64_t             uart_mmio_stop     = 0x10000100;
@@ -332,6 +404,35 @@ int add_fdt_soc_node(void *fdt) {
   return soc;
 }
 
+int add_fdt_plic_node(void *fdt, int soc, uint32_t intc_phandle) {
+  std::string plic_node_name = "plic@" + std::to_string(plic_mmio_start);
+  int         plic = fdt_add_subnode(fdt, soc, plic_node_name.c_str());
+  if (plic < 0) throw std::runtime_error("failed to add plic subnode");
+  uint64_t plic_reg[] = {cpu_to_fdt64(plic_mmio_start),
+                         cpu_to_fdt64(plic_mmio_stop - plic_mmio_start)};
+  if (fdt_setprop(fdt, plic, "reg", plic_reg, sizeof(plic_reg)))
+    throw std::runtime_error("failed to set plic reg property");
+  if (fdt_setprop_string(fdt, plic, "compatible", "sifive,plic-1.0.0"))
+    throw std::runtime_error("failed to set plic compatible property");
+  if (fdt_appendprop_string(fdt, plic, "compatible", "riscv,plic0"))
+    throw std::runtime_error("failed to set plic compatible property");
+  if (fdt_setprop_cell(fdt, plic, "#interrupt-cells", 1))
+    throw std::runtime_error("failed to set plic #interrupt-cells property");
+  if (fdt_setprop(fdt, plic, "interrupt-controller", nullptr, 0))
+    throw std::runtime_error(
+        "failed to set plic interrupt-controller property");
+  if (fdt_setprop_cell(fdt, plic, "riscv,ndev", 32))
+    throw std::runtime_error("failed to set plic riscv,ndev property");
+  uint32_t plic_intr[] = {cpu_to_fdt32(intc_phandle), cpu_to_fdt32(11)};
+  if (fdt_setprop(fdt, plic, "interrupts-extended", plic_intr,
+                  sizeof(plic_intr)))
+    throw std::runtime_error("failed to set plic interrupts-extended property");
+  uint32_t plic_phandle = 2;
+  if (fdt_setprop_cell(fdt, plic, "phandle", plic_phandle))
+    throw std::runtime_error("failed to set plic phandle property");
+  return plic_phandle;
+}
+
 int add_fdt_uart_node(void *fdt, int soc) {
   std::string uart_node_name = "uart@" + std::to_string(uart_mmio_start);
   int         uart = fdt_add_subnode(fdt, soc, uart_node_name.c_str());
@@ -406,6 +507,7 @@ std::vector<uint8_t> generate_dtb() {
   int cpu0    = add_fdt_cpu_node(fdt, cpus);
   int intc    = add_fdt_interrupt_controller(fdt, cpu0);
   int soc     = add_fdt_soc_node(fdt);
+  int plic    = add_fdt_plic_node(fdt, soc, intc);
   int uart    = add_fdt_uart_node(fdt, soc);
   int clint   = add_fdt_clint_node(fdt, soc, intc);
   int fb_node = add_fdt_framebuffer_node(fdt, soc);
@@ -417,7 +519,8 @@ int main(int argc, char **argv) {
   if (argc != 2) throw std::runtime_error("[dem] [Image]");
 
   machine = new dawn::machine_t(
-      ram_size, offset, {framebuffer_handler, uart_handler, clint_handler});
+      ram_size, offset,
+      {framebuffer_handler, uart_handler, clint_handler, plic_handler});
 
   auto kernel = read_file(argv[1]);
   std::cout << "kernel size: " << kernel.size() << '\n';
@@ -478,12 +581,29 @@ int main(int argc, char **argv) {
           std::this_thread::sleep_for(std::chrono::microseconds(time_left));
         }
       }
+      // timer
       timer = get_time_now_us() - boot_time;
       if (timercmp && timer > timercmp) {
         machine->_csr[dawn::MIP] |= (1ull << 7);  // set mtip
       } else {
         machine->_csr[dawn::MIP] &= ~(1ull << 7);  // set mtip
       }
+      // plic
+      bool is_plic_pending = false;
+      for (uint32_t id = 1; id < 1024; id++) {
+        uint32_t word_idx = id / 32;
+        uint32_t bit_mask = 1 << (id % 32);
+        if ((plic._pending[word_idx] & bit_mask) &&
+            (plic._enable[word_idx] & bit_mask) &&
+            (plic._priority[id] > plic._threshold)) {
+          is_plic_pending = true;
+          break;
+        }
+      }
+      if (is_plic_pending)
+        machine->_csr[dawn::MIP] |= (1ull << 11);
+      else
+        machine->_csr[dawn::MIP] &= ~(1ull << 11);
     }
 
     uint64_t elapsed = get_time_now_us() - loop_start;
